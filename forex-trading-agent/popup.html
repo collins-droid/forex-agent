@@ -45,6 +45,54 @@
       border-radius: 5px;
       margin-top: 10px;
     }
+    .spatial-analysis {
+      background-color: #e8f4fa;
+      padding: 10px;
+      border-radius: 5px;
+      margin-top: 10px;
+    }
+    .element-count {
+      font-weight: bold;
+    }
+    .pattern-list {
+      font-size: 12px;
+      margin: 5px 0;
+      padding-left: 15px;
+    }
+    .pattern-list li {
+      margin-bottom: 3px;
+    }
+    .status-chip {
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 12px;
+      font-size: 11px;
+      margin-right: 5px;
+      background-color: #e0e0e0;
+    }
+    .status-chip.strong {
+      background-color: #a5d6a7;
+      color: #1b5e20;
+    }
+    .status-chip.weak {
+      background-color: #ffccbc;
+      color: #bf360c;
+    }
+    .status-chip.neutral {
+      background-color: #b3e5fc;
+      color: #01579b;
+    }
+    .refresh-btn {
+      font-size: 12px;
+      background-color: #2196F3;
+      padding: 5px;
+      border-radius: 3px;
+      float: right;
+      margin-bottom: 5px;
+    }
+    .refresh-btn:hover {
+      background-color: #0d8bf2;
+    }
     .disclaimer {
       font-size: 11px;
       color: #777;
@@ -52,10 +100,21 @@
       margin-top: 15px;
       font-style: italic;
     }
+    #errorContainer {
+      display: none;
+      background-color: #ffebee;
+      color: #c62828;
+      padding: 8px;
+      border-radius: 5px;
+      margin: 10px 0;
+      font-size: 12px;
+    }
   </style>
 </head>
 <body>
   <h2>Forex Trading Agent</h2>
+  
+  <div id="errorContainer"></div>
   
   <div class="settings-group">
     <label for="apiKey">OpenAI API Key:</label>
@@ -94,10 +153,31 @@
   <button id="stopBtn" disabled>Stop Agent</button>
   
   <div class="metrics">
+    <button id="refreshBtn" class="refresh-btn">Refresh</button>
     <h3>Performance Metrics</h3>
     <p>Win Rate: <span id="winRate">0%</span></p>
     <p>Profit/Loss: <span id="profitLoss">$0.00</span></p>
     <p>Total Trades: <span id="totalTrades">0</span></p>
+    <p>Last Trade: <span id="lastTradeTime">N/A</span></p>
+    <p>Status: <span id="statusIndicator" class="status-dot">●</span></p>
+  </div>
+  
+  <div class="spatial-analysis">
+    <h3>OmniParser Analysis</h3>
+    <p>Detected Elements: <span id="detectedElements" class="element-count">0</span></p>
+    <p>Element Distribution:
+      <div class="element-distribution">
+        <div>Top: <span id="topElements">0</span></div>
+        <div>Middle: <span id="middleElements">0</span></div>
+        <div>Bottom: <span id="bottomElements">0</span></div>
+      </div>
+    </p>
+    <p>Detected Patterns:</p>
+    <ul id="detectedPatterns" class="pattern-list">
+      <li>No patterns detected yet</li>
+    </ul>
+    <p>Active Strategies:</p>
+    <div id="activeStrategies"></div>
   </div>
   
   <div class="disclaimer">

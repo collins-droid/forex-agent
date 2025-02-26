@@ -141,6 +141,7 @@ async function runTradingCycle() {
     const parsedContentList = omniparserData.parsed_content_list;
     const dinoLabeledImg = omniparserData.dino_labeled_img;
     const originalImage = omniparserData.original_image;
+    const label_coordinates = omniparserData.label_coordinates || {};
     
     // Check if we have an error from OmniParser
     if (omniparserData.error) {
@@ -151,6 +152,7 @@ async function runTradingCycle() {
     // Log parsed data for debugging
     console.log(`OmniParser found ${parsedContentList.length} elements`);
     console.log(`Labeled image available: ${Boolean(dinoLabeledImg)}`);
+    console.log(`Bounding box coordinates available: ${Object.keys(label_coordinates).length > 0}`);
     
     // 3. Send to backend for analysis
     console.log('Analyzing market data through backend API...');
@@ -164,6 +166,7 @@ async function runTradingCycle() {
           parsed_content_list: parsedContentList,
           original_image: originalImage,
           labeled_image: dinoLabeledImg,
+          label_coordinates: label_coordinates,
           currency_pair: settings.currencyPair
         })
       });
@@ -187,7 +190,15 @@ async function runTradingCycle() {
       
       // 4. Analyze data with LLM and make trading decision
       console.log('Getting trading decision from backend...');
-      const adjustedDecision = await getTradingDecision(settings.apiKey, marketData, parsedContentList, tradeHistory, originalImage, dinoLabeledImg);
+      const adjustedDecision = await getTradingDecision(
+        settings.apiKey, 
+        marketData, 
+        parsedContentList, 
+        tradeHistory, 
+        originalImage, 
+        dinoLabeledImg, 
+        label_coordinates
+      );
       
       // Log the decision details including triggered strategies
       console.log('Trading decision:', adjustedDecision);
@@ -246,7 +257,8 @@ async function runTradingCycle() {
         marketData: marketData,
         parsedContentList: parsedContentList,
         analysisType: 'multi-strategy',
-        originalDecision: tradingDecision
+        originalDecision: tradingDecision,
+        labelCoordinates: label_coordinates
       });
       
       // 7. Update performance metrics with enhanced evaluation
@@ -332,7 +344,8 @@ async function sendToOmniParser(omniparserUrl, base64Image) {
         base64_image: base64Image,
         focus: "forex_chart",
         box_threshold: 0.05,
-        iou_threshold: 0.1
+        iou_threshold: 0.1,
+        output_coord_in_ratio: true
       })
     });
     
@@ -345,17 +358,18 @@ async function sendToOmniParser(omniparserUrl, base64Image) {
     // Extract data from the enhanced response
     const parsed_content_list = omniparserResponse.parsed_content_list || [];
     const dino_labeled_img = omniparserResponse.dino_labeled_img || '';
+    const label_coordinates = omniparserResponse.label_coordinates || {};
     
     // Log summary of parsed elements
     console.log(`OmniParser found ${parsed_content_list.length} elements in the image`);
-    
-    // Check if we have a labeled image
     console.log(`Labeled image available: ${Boolean(dino_labeled_img)}`);
+    console.log(`Bounding box coordinates available: ${Object.keys(label_coordinates).length > 0}`);
     
     return {
       parsed_content_list,
       dino_labeled_img,
-      original_image: base64Image
+      original_image: base64Image,
+      label_coordinates
     };
   } catch (error) {
     console.error('OmniParser error:', error);
@@ -364,6 +378,7 @@ async function sendToOmniParser(omniparserUrl, base64Image) {
       parsed_content_list: [],
       dino_labeled_img: '',
       original_image: base64Image,
+      label_coordinates: {},
       error: error.message
     };
   }
@@ -377,12 +392,35 @@ async function sendToOmniParser(omniparserUrl, base64Image) {
  * @param {Array} history - Trade history
  * @param {string} originalImage - Base64 original chart image
  * @param {string} labeledImage - Base64 DINO labeled image
+ * @param {Object} label_coordinates - Bounding box coordinates from OmniParser
  * @returns {Promise<Object>} - Trading decision
  */
-async function getTradingDecision(apiKey, marketData, parsedContentList, history, originalImage = '', labeledImage = '') {
+async function getTradingDecision(apiKey, marketData, parsedContentList, history, originalImage = '', labeledImage = '', label_coordinates = {}) {
   try {
     // Prepare the input data
     const currencyPair = marketData.currency_pair || 'EURUSD';
+    
+    // Add spatial awareness to market data if we have coordinates
+    if (Object.keys(label_coordinates).length > 0) {
+      marketData.spatial_data = {
+        label_coordinates: label_coordinates,
+        elements_with_position: parsedContentList.map((item, index) => {
+          const bbox = label_coordinates[index.toString()];
+          if (!bbox) return null;
+          
+          return {
+            content: item.content,
+            type: item.type || 'unknown',
+            position: {
+              top: bbox[1],
+              left: bbox[0],
+              bottom: bbox[3],
+              right: bbox[2]
+            }
+          };
+        }).filter(Boolean)
+      };
+    }
     
     // Create the request body with enhanced dual-image support
     const requestData = {
@@ -391,11 +429,13 @@ async function getTradingDecision(apiKey, marketData, parsedContentList, history
       trade_history: history,
       original_image: originalImage,
       labeled_image: labeledImage,
+      label_coordinates: label_coordinates,
       settings: {
         api_key: apiKey,
         currency_pair: currencyPair,
         use_multi_strategy: true,
-        use_dual_image: Boolean(labeledImage)
+        use_dual_image: Boolean(labeledImage),
+        use_spatial_analysis: Object.keys(label_coordinates).length > 0
       }
     };
     
@@ -404,6 +444,7 @@ async function getTradingDecision(apiKey, marketData, parsedContentList, history
     console.log('- Market data fields:', Object.keys(marketData));
     console.log('- Parsed elements:', parsedContentList.length);
     console.log('- Using dual-image approach:', Boolean(labeledImage));
+    console.log('- Using spatial analysis:', Object.keys(label_coordinates).length > 0);
     console.log('- Historical trades:', history.length);
     
     // Call the backend API (with enhanced error handling)
@@ -450,7 +491,8 @@ async function getTradingDecision(apiKey, marketData, parsedContentList, history
       
       // Fall back to OpenAI with dual-image approach if available
       const prompt = constructPrompt(marketData, parsedContentList, history, 
-                                    Boolean(labeledImage) && Boolean(originalImage));
+                                    Boolean(labeledImage) && Boolean(originalImage),
+                                    label_coordinates);
       
       const openaiResponse = await fetch('https://api.openai.com/v1/chat/completions', {
         method: 'POST',
@@ -516,9 +558,6 @@ async function getTradingDecision(apiKey, marketData, parsedContentList, history
       decision.direction = null;
     }
     
-    // Normalize action to string
-    decision.action = String(decision.action || 'hold').toLowerCase();
-    
     // Ensure we have an array for reasoning
     if (typeof decision.reasoning === 'string') {
       decision.reasoning = [decision.reasoning];
@@ -538,6 +577,14 @@ async function getTradingDecision(apiKey, marketData, parsedContentList, history
     
     if (decision.take_profit_pips && !isNaN(Number(decision.take_profit_pips))) {
       decision.take_profit_pips = Number(decision.take_profit_pips);
+    }
+    
+    // Add spatial analysis if available
+    if (Object.keys(label_coordinates).length > 0 && !decision.spatial_analysis) {
+      decision.spatial_analysis = {
+        used_coordinates: true,
+        elements_count: Object.keys(label_coordinates).length
+      };
     }
     
     // Add a timestamp
@@ -573,7 +620,7 @@ async function getBackendUrl() {
 /**
  * Constructs a detailed prompt for the LLM based on market data and trade history
  */
-function constructPrompt(marketData, parsedContentList, history, useDualImage) {
+function constructPrompt(marketData, parsedContentList, history, useDualImage, label_coordinates = {}) {
   // Get recent trades history (up to 5 most recent trades)
   const recentTrades = history.slice(-5);
   const historyStr = JSON.stringify(recentTrades, null, 2) || "None";
@@ -591,6 +638,52 @@ function constructPrompt(marketData, parsedContentList, history, useDualImage) {
     for (const [type, count] of Object.entries(elementTypes)) {
       parsedSummary += `- ${type}: ${count}\n`;
     }
+  }
+  
+  // Add enriched parsed elements with bounding box data
+  const enrichedElements = parsedContentList.map((item, index) => {
+    const bbox = label_coordinates[index.toString()] || null;
+    return {
+      ...item,
+      bbox: bbox,
+      position: bbox ? {
+        top: Math.round(bbox[1] * 100) + "%",
+        left: Math.round(bbox[0] * 100) + "%", 
+        width: Math.round((bbox[2] - bbox[0]) * 100) + "%",
+        height: Math.round((bbox[3] - bbox[1]) * 100) + "%"
+      } : null
+    };
+  });
+  
+  // Create a spatial summary with bounding box data
+  let spatialAnalysis = "";
+  if (Object.keys(label_coordinates).length > 0) {
+    // Group elements by their vertical position (top of the chart, middle, bottom)
+    const topElements = [];
+    const middleElements = [];
+    const bottomElements = [];
+    
+    enrichedElements.forEach(item => {
+      if (item.bbox) {
+        const yPosition = item.bbox[1]; // y coordinate (0-1)
+        if (yPosition < 0.33) {
+          topElements.push(item);
+        } else if (yPosition < 0.66) {
+          middleElements.push(item);
+        } else {
+          bottomElements.push(item);
+        }
+      }
+    });
+    
+    spatialAnalysis = `
+SPATIAL ANALYSIS:
+- Top section elements (${topElements.length}): ${topElements.map(e => e.content).join(', ')}
+- Middle section elements (${middleElements.length}): ${middleElements.map(e => e.content).join(', ')}
+- Bottom section elements (${bottomElements.length}): ${bottomElements.map(e => e.content).join(', ')}
+
+Elements with bounding box data: ${Object.keys(label_coordinates).length}
+    `;
   }
   
   // Calculate current performance metrics
@@ -617,6 +710,7 @@ When analyzing these images:
 - Identify candlestick patterns, trend lines, and support/resistance levels
 - Look for indicator values (RSI, MACD, etc.) in both images
 - Compare visual patterns with the extracted data in the market data JSON
+- Use bounding box coordinates to understand the spatial relationships between elements
 `;
   }
   
@@ -630,6 +724,13 @@ ${JSON.stringify(marketData, null, 2)}
 \`\`\`
 
 ${parsedSummary}
+
+${Object.keys(label_coordinates).length > 0 ? `ELEMENTS WITH SPATIAL DATA:
+\`\`\`json
+${JSON.stringify(enrichedElements.filter(e => e.bbox), null, 2)}
+\`\`\`
+
+${spatialAnalysis}` : ''}
 
 RECENT TRADES:
 \`\`\`json
@@ -681,9 +782,20 @@ ANALYSIS INSTRUCTIONS:
 5. Provide specific values for stop-loss and take-profit
 6. Calculate position size based on risk parameters
 7. Include confidence score based on signal strength and confluence
+8. Use spatial information from bounding boxes to identify chart patterns and indicators
 
-${useDualImage ? `IMAGE ANALYSIS:
-Analyze both provided images carefully. Use the original image for context and pattern recognition, and the labeled image to identify key elements highlighted by the DINO detector. Incorporate visual cues into your decision-making process.
+${useDualImage ? `IMAGE ANALYSIS WITH SPATIAL CONTEXT:
+Analyze both provided images carefully. Use the original image for context and pattern recognition, and the labeled image to identify key elements highlighted by the DINO detector. 
+
+Pay special attention to:
+- Elements at the top of the chart (typically price information)
+- Elements in the middle (typically candlestick patterns)
+- Elements at the bottom (typically indicators like RSI, MACD)
+- Relative positions of support/resistance lines
+- Patterns formed by sequential candlesticks
+- Indicator values and their positions
+
+Incorporate visual cues and their spatial relationships into your decision-making process.
 ` : ''}
 
 REQUIRED OUTPUT FORMAT (JSON):
@@ -699,7 +811,12 @@ REQUIRED OUTPUT FORMAT (JSON):
   "market_conditions": {
     "trend": "bullish", "bearish", or "sideways",
     "volatility": "high", "normal", or "low",
-    "key_levels": ["level1", "level2", ...]
+    "key_levels": ["level1", "level2", ...],
+    "detected_patterns": ["pattern1", "pattern2", ...]
+  },
+  "spatial_analysis": {
+    "key_areas": ["description of important areas and their significance"],
+    "indicator_readings": {"indicator_name": "value"}
   }
 }
 `;
@@ -710,6 +827,29 @@ REQUIRED OUTPUT FORMAT (JSON):
  * @param {Object} trade - Trade details
  */
 function logTrade(trade) {
+  // Add spatial elements summary if we have coordinates
+  if (trade.labelCoordinates && Object.keys(trade.labelCoordinates).length > 0) {
+    // Count elements by their vertical position (top, middle, bottom)
+    const spatialSummary = {
+      top: 0,
+      middle: 0,
+      bottom: 0
+    };
+    
+    Object.values(trade.labelCoordinates).forEach(bbox => {
+      const yPosition = bbox[1]; // y coordinate (0-1)
+      if (yPosition < 0.33) {
+        spatialSummary.top++;
+      } else if (yPosition < 0.66) {
+        spatialSummary.middle++;
+      } else {
+        spatialSummary.bottom++;
+      }
+    });
+    
+    trade.spatialSummary = spatialSummary;
+  }
+  
   tradeHistory.push(trade);
   
   // Keep only the last 100 trades to avoid excessive storage
@@ -718,7 +858,18 @@ function logTrade(trade) {
   }
   
   // Save to storage
-  chrome.storage.local.set({ tradeHistory });
+  chrome.storage.local.set({ 
+    tradeHistory: tradeHistory,
+    lastTrade: trade  // Store the latest trade separately for easy access
+  });
+  
+  // Notify the popup of the new trade
+  chrome.runtime.sendMessage({ 
+    action: 'tradeLogged',
+    trade: trade
+  }).catch(() => {
+    // Popup may not be open, this is fine
+  });
   
   console.log('Trade logged:', trade);
 }
@@ -767,6 +918,8 @@ function evaluatePerformance() {
   chrome.runtime.sendMessage({
     action: 'updateMetrics',
     ...tradePerformance
+  }).catch(() => {
+    // Popup may not be open, this is fine
   });
   
   console.log('Performance metrics updated:', tradePerformance);
