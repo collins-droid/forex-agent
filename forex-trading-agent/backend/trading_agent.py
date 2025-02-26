@@ -11,6 +11,8 @@ import requests
 import base64
 from datetime import datetime
 from typing import Dict, List, Any, Optional, Tuple, Union
+import re
+import copy
 
 # Configure logging
 logging.basicConfig(
@@ -53,63 +55,41 @@ class TradingAgent:
         
         logger.info(f"Trading agent initialized for {currency_pair} with lot size {lot_size}")
     
-    def analyze_market(self, parsed_content_list: List[Dict[str, Any]], trade_history=None) -> Dict[str, Any]:
+    def analyze_market(self, screenshot_base64: str) -> Tuple[Dict[str, Any], List[Dict[str, Any]], str]:
         """
-        Analyze the forex market data extracted from OmniParser and make trade decisions.
+        Analyze the forex market using OmniParser and make trade decisions.
         
         Args:
-            parsed_content_list: List of parsed content from OmniParser
-            trade_history: List of previous trades for context (optional)
+            screenshot_base64: Base64-encoded screenshot of the chart
             
         Returns:
-            Dict containing analysis results and trade decision
+            Tuple containing:
+            - Dict with market data
+            - List of parsed content from OmniParser
+            - String with base64-encoded labeled image
         """
-        if trade_history is None:
-            trade_history = []
-        
         try:
-            logger.info("Starting market analysis")
+            logger.info("Starting market analysis with OmniParser")
+            
+            # Call OmniParser to get parsed content and labeled image
+            response = self._call_omniparser(screenshot_base64)
+            parsed_content_list = response.get('parsed_content_list', [])
+            dino_labeled_img = response.get('dino_labeled_img', '')
             
             # Extract relevant data from parsed content
-            try:
-                forex_data = self._extract_forex_data(parsed_content_list)
-            except Exception as e:
-                logger.error(f"Error extracting forex data: {str(e)}")
-                return {
-                    "status": "error",
-                    "error": f"Failed to extract forex data: {str(e)}",
-                    "timestamp": datetime.now().isoformat()
-                }
+            forex_data = self._extract_forex_data(parsed_content_list)
             
-            # Calculate market confidence based on extracted patterns, indicators and price levels
-            confidence_score = self._calculate_confidence_score(forex_data)
-            
-            # Apply risk management rules
-            risk_assessment = self._assess_risk(forex_data, trade_history)
-            
-            # Make trade decision using enhanced pattern recognition
-            trade_decision = self.make_trade_decision(forex_data, confidence_score, risk_assessment, trade_history)
-            
-            analysis_result = {
-                "status": "success",
-                "timestamp": datetime.now().isoformat(),
-                "currency_pair": self.currency_pair,
-                "forex_data": forex_data,
-                "confidence_score": confidence_score,
-                "risk_assessment": risk_assessment,
-                "trade_decision": trade_decision
-            }
-            
-            logger.info(f"Analysis completed: {json.dumps(analysis_result, default=str)}")
-            return analysis_result
+            logger.info(f"Market analysis complete: {len(parsed_content_list)} items parsed")
+            return forex_data, parsed_content_list, dino_labeled_img
             
         except Exception as e:
-            logger.error(f"Error in market analysis: {str(e)}")
+            logger.error(f"Error in market analysis: {e}")
+            # Return empty data on error
             return {
-                "status": "error",
-                "error": f"Market analysis failed: {str(e)}",
-                "timestamp": datetime.now().isoformat()
-            }
+                "currency_pair": self.currency_pair,
+                "timestamp": datetime.now().isoformat(),
+                "error": str(e)
+            }, [], ""
     
     def _calculate_confidence_score(self, forex_data: Dict[str, Any]) -> float:
         """
@@ -657,37 +637,47 @@ class TradingAgent:
     
     def _call_omniparser(self, screenshot_base64: str) -> Dict[str, Any]:
         """
-        Call the OmniParser service with a screenshot.
+        Call the OmniParser service with a screenshot, with enhanced parameters for forex chart focus.
         
         Args:
             screenshot_base64: Base64-encoded screenshot of the chart
             
         Returns:
-            Dict containing the OmniParser response
+            Dict containing the OmniParser response with parsed content and labeled image
         """
-        response = requests.post(
-            f"{self.omniparser_url}/parse/",
-            json={"image": screenshot_base64},
-            headers={"Content-Type": "application/json"},
-            timeout=30
-        )
-        
-        if response.status_code != 200:
-            logger.error(f"OmniParser returned error: {response.status_code}, {response.text}")
-            raise Exception(f"OmniParser error: {response.status_code}")
-        
-        # Parse the response
-        return response.json()
+        try:
+            response = requests.post(
+                f"{self.omniparser_url}/parse/",
+                json={
+                    "base64_image": screenshot_base64, 
+                    "focus": "forex_chart", 
+                    "box_threshold": 0.05, 
+                    "iou_threshold": 0.1
+                },
+                headers={"Content-Type": "application/json"},
+                timeout=30
+            )
+            
+            if response.status_code != 200:
+                logger.error(f"OmniParser returned error: {response.status_code}, {response.text}")
+                raise Exception(f"OmniParser error: {response.status_code}")
+            
+            # Parse the response
+            return response.json()
+        except requests.RequestException as e:
+            logger.error(f"OmniParser request failed: {e}")
+            raise Exception(f"OmniParser error: {e}")
     
     def _extract_forex_data(self, parsed_content_list: List[Dict[str, Any]]) -> Dict[str, Any]:
         """
-        Extract relevant forex data from the OmniParser parsed_content_list.
+        Extract forex trading data from OmniParser's parsed content list.
+        Enhanced to handle icon detection and comprehensive text parsing.
         
         Args:
-            parsed_content_list: List of parsed content items from OmniParser
+            parsed_content_list: List of parsed content from OmniParser
             
         Returns:
-            Dict containing structured forex data
+            Dict containing extracted forex data
         """
         forex_data = {
             "currency_pair": self.currency_pair,
@@ -695,123 +685,145 @@ class TradingAgent:
             "candlestick_patterns": [],
             "indicators": {},
             "price_levels": {},
-            "trend": "neutral",  # New field for trend detection
-            "parsed_elements_count": len(parsed_content_list)
+            "trend": "neutral",
+            "icons_detected": [],
+            "parsed_elements_count": len(parsed_content_list),
+            "text_elements": []
         }
+        
+        # Log the number of elements detected
+        logger.info(f"Processing {len(parsed_content_list)} elements from OmniParser")
         
         for item in parsed_content_list:
             content = item.get('content', '').lower()
+            item_type = item.get('type', '')
+            
+            # Skip empty content
             if not content: 
                 continue
-            
-            # Define patterns to look for
-            patterns = {
-                "bullish engulfing": "bullish_engulfing",
-                "bearish engulfing": "bearish_engulfing",
-                "doji": "doji",
-                "hammer": "hammer",
-                "shooting star": "shooting_star",
-                "morning star": "morning_star",
-                "evening star": "evening_star",
-                "pinbar": "pinbar",
-                "tweezer top": "tweezer_top",
-                "tweezer bottom": "tweezer_bottom"
-            }
-            
-            # Check for candlestick patterns
-            for pattern, key in patterns.items():
-                if pattern in content:
-                    forex_data["candlestick_patterns"].append(key)
-                    logger.info(f"Detected pattern: {key}")
-            
-            # Extract trend information
-            if "trend" in content or "uptrend" in content or "downtrend" in content:
-                if "uptrend" in content or "bullish trend" in content:
-                    forex_data["trend"] = "up"
-                    logger.info("Detected uptrend")
-                elif "downtrend" in content or "bearish trend" in content:
-                    forex_data["trend"] = "down"
-                    logger.info("Detected downtrend")
-            
-            # Extract RSI values
-            if "rsi" in content:
-                try:
-                    # Try multiple formats: "RSI: 25.5%", "RSI: 25.5", "RSI 25.5"
-                    if ":" in content:
-                        rsi_str = content.split("rsi:")[1].strip().split()[0].replace('%', '')
-                    else:
-                        rsi_str = content.split("rsi")[1].strip().split()[0].replace('%', '')
-                    forex_data["indicators"]["RSI"] = float(rsi_str)
-                    logger.info(f"Extracted RSI: {rsi_str}")
-                except (ValueError, IndexError):
-                    logger.warning(f"Failed to parse RSI: {content}")
                 
-            # Extract price levels
-            price_levels = {
-                "bid": "bid", 
-                "ask": "ask", 
-                "support": "support", 
-                "resistance": "resistance", 
-                "pivot": "pivot",
-                "s1": "support_1", 
-                "s2": "support_2", 
-                "r1": "resistance_1", 
-                "r2": "resistance_2"
-            }
-            
-            for level_term, level_key in price_levels.items():
-                if level_term in content:
-                    try:
-                        # Try formats like "bid: 1.1234" or "support: 1.1234"
-                        level_parts = content.split(f"{level_term}:")
-                        if len(level_parts) > 1:
-                            # Extract the first number following the label
-                            level_value = float(level_parts[1].strip().split()[0])
-                            forex_data["price_levels"][level_key] = level_value
-                            logger.info(f"Extracted {level_key}: {level_value}")
-                    except (ValueError, IndexError):
-                        logger.warning(f"Failed to parse {level_key}: {content}")
-            
-            # Extract MACD values
-            if "macd" in content:
-                try:
-                    if ":" in content:
-                        macd_str = content.split("macd:")[1].strip().split()[0]
-                    else:
-                        macd_str = content.split("macd")[1].strip().split()[0]
-                    forex_data["indicators"]["MACD"] = float(macd_str)
-                    logger.info(f"Extracted MACD: {macd_str}")
-                except (ValueError, IndexError):
-                    logger.warning(f"Failed to parse MACD: {content}")
+            # Process different types of elements
+            if item_type == 'icon':
+                # Add to icons detected list
+                forex_data["icons_detected"].append(content)
                 
-            # Extract other common indicators
-            indicators = {
-                "stochastic": "Stochastic",
-                "atr": "ATR", 
-                "bollinger": "Bollinger",
-                "ema": "EMA",
-                "sma": "SMA"
-            }
+                # Check for candlestick patterns in icons
+                if "candlestick" in content or "pattern" in content:
+                    if "bullish" in content:
+                        forex_data["candlestick_patterns"].append("bullish_pattern")
+                    elif "bearish" in content:
+                        forex_data["candlestick_patterns"].append("bearish_pattern")
+                    elif "doji" in content:
+                        forex_data["candlestick_patterns"].append("doji")
+                
+                # Check for trend indicators in icons
+                if "trend" in content:
+                    if "up" in content or "bullish" in content:
+                        forex_data["trend"] = "up"
+                    elif "down" in content or "bearish" in content:
+                        forex_data["trend"] = "down"
             
-            for ind_term, ind_key in indicators.items():
-                if ind_term in content:
+            # Process text elements for more detailed information
+            elif item_type == 'text':
+                # Add to text elements for analysis
+                forex_data["text_elements"].append(content)
+                
+                # Define patterns to look for in text
+                patterns = {
+                    "bullish engulfing": "bullish_engulfing",
+                    "bearish engulfing": "bearish_engulfing",
+                    "doji": "doji",
+                    "hammer": "hammer",
+                    "shooting star": "shooting_star",
+                    "morning star": "morning_star",
+                    "evening star": "evening_star",
+                    "pinbar": "pinbar",
+                    "tweezer top": "tweezer_top",
+                    "tweezer bottom": "tweezer_bottom"
+                }
+                
+                # Check for candlestick patterns in text
+                for pattern, key in patterns.items():
+                    if pattern in content:
+                        forex_data["candlestick_patterns"].append(key)
+                
+                # Process trend information
+                if "trend" in content:
+                    if "uptrend" in content or "bullish trend" in content:
+                        forex_data["trend"] = "up"
+                    elif "downtrend" in content or "bearish trend" in content:
+                        forex_data["trend"] = "down"
+                    elif "sideways" in content or "range" in content:
+                        forex_data["trend"] = "sideways"
+                
+                # Extract RSI values
+                if "rsi" in content:
                     try:
+                        # Try multiple formats of RSI representation
                         if ":" in content:
-                            ind_str = content.split(f"{ind_term}:")[1].strip().split()[0]
-                            try:
-                                ind_value = float(ind_str)
-                                forex_data["indicators"][ind_key] = ind_value
-                                logger.info(f"Extracted {ind_key}: {ind_value}")
-                            except ValueError:
-                                # If it's not a float, store as string (e.g., "overbought")
-                                forex_data["indicators"][ind_key] = ind_str
-                                logger.info(f"Extracted {ind_key}: {ind_str}")
-                    except (IndexError):
-                        # If we can't extract a value, just note the presence
-                        forex_data["indicators"][ind_key] = True
-                        logger.info(f"Detected presence of {ind_key}")
+                            rsi_str = content.split("rsi:")[1].strip().split()[0].replace('%', '')
+                        elif "=" in content:
+                            rsi_str = content.split("rsi=")[1].strip().split()[0].replace('%', '')
+                        else:
+                            # Extract any number after RSI
+                            rsi_match = re.search(r'rsi.*?(\d+\.?\d*)', content)
+                            rsi_str = rsi_match.group(1) if rsi_match else None
+                        
+                        if rsi_str:
+                            forex_data["indicators"]["RSI"] = float(rsi_str)
+                    except (ValueError, IndexError, AttributeError) as e:
+                        logger.warning(f"Failed to parse RSI: {content} - Error: {e}")
+                
+                # Extract price levels
+                price_mappings = {
+                    "bid": "bid",
+                    "ask": "ask",
+                    "support": "support",
+                    "resistance": "resistance",
+                    "pivot": "pivot",
+                    "s1": "support_1",
+                    "s2": "support_2",
+                    "r1": "resistance_1",
+                    "r2": "resistance_2"
+                }
+                
+                for term, key in price_mappings.items():
+                    if term in content:
+                        try:
+                            # Extract price using regex to find numbers after the term
+                            price_match = re.search(fr'{term}[^0-9]*(\d+\.?\d*)', content)
+                            if price_match:
+                                forex_data["price_levels"][key] = float(price_match.group(1))
+                        except (ValueError, IndexError, AttributeError) as e:
+                            logger.warning(f"Failed to parse {term}: {content} - Error: {e}")
+            
+            # Process bounding box data for spatial awareness
+            if 'bbox' in item:
+                bbox = item.get('bbox', {})
+                # Use bounding box information to enhance context
+                # For example, detecting chart areas vs indicator areas
+                if bbox and all(k in bbox for k in ['x', 'y', 'width', 'height']):
+                    # Top of screen typically contains price information
+                    if bbox['y'] < 0.2:  # First 20% of screen height
+                        if "price" in content or any(c.isdigit() for c in content):
+                            # Try to extract a price from this area
+                            price_match = re.search(r'(\d+\.\d+)', content)
+                            if price_match:
+                                forex_data["price_levels"]["current"] = float(price_match.group(1))
         
-        logger.info(f"Extracted Forex Data: {forex_data}")
+        # Determine overall market state from collected data
+        if forex_data["indicators"].get("RSI", 50) > 70:
+            forex_data["market_state"] = "overbought"
+        elif forex_data["indicators"].get("RSI", 50) < 30:
+            forex_data["market_state"] = "oversold"
+        elif forex_data["trend"] == "up":
+            forex_data["market_state"] = "bullish"
+        elif forex_data["trend"] == "down":
+            forex_data["market_state"] = "bearish"
+        else:
+            forex_data["market_state"] = "neutral"
+        
+        logger.info(f"Extracted Forex Data: {json.dumps(forex_data, default=str)}")
         return forex_data
     
     def decide_trade(self, market_data: Dict[str, Any]) -> Dict[str, Any]:
@@ -988,14 +1000,15 @@ class TradingAgent:
             "average_loss": avg_loss
         }
 
-    def log_trade(self, trade: Dict[str, Any], market_data: Dict[str, Any], parsed_content_list: List[Dict[str, Any]]) -> None:
+    def log_trade(self, trade: Dict[str, Any], market_data: Dict[str, Any], parsed_content_list: List[Dict[str, Any]], dino_labeled_img: str = "") -> None:
         """
-        Log a trade to the trade history.
+        Log a trade to the trade history with enhanced OmniParser data.
         
         Args:
             trade: The trade decision
             market_data: The market data that led to the decision
             parsed_content_list: The raw OmniParser output
+            dino_labeled_img: Base64-encoded labeled image from OmniParser
         """
         trade_log = {
             "timestamp": trade.get("timestamp", datetime.now().isoformat()),
@@ -1004,16 +1017,27 @@ class TradingAgent:
             "reasoning": trade["reasoning"],
             "reward": trade["reward"],
             "market_data": market_data,
-            "parsed_content_list": parsed_content_list
+            "parsed_content_list": parsed_content_list,
+            "dino_labeled_img": dino_labeled_img
         }
         
         self.trade_history.append(trade_log)
-        logger.info(f"Trade logged: {trade_log}")
+        logger.info(f"Trade logged: {trade['action']} at {trade_log['timestamp']}")
         
         # Optionally, you could save to a database or file here
         try:
             with open(f"{self.currency_pair}_trade_history.json", 'w') as f:
-                json.dump(self.trade_history, f, indent=2)
+                # Save a version without the large base64 images for efficiency
+                save_log = copy.deepcopy(trade_log)
+                if save_log.get("dino_labeled_img"):
+                    save_log["has_labeled_img"] = True
+                    save_log["dino_labeled_img"] = "...base64 image removed for storage efficiency..."
+                
+                history_to_save = [log if not isinstance(log, dict) or not log.get("dino_labeled_img") 
+                                 else {**log, "dino_labeled_img": "...base64 image removed..."}
+                                 for log in self.trade_history]
+                
+                json.dump(history_to_save, f, indent=2, default=str)
         except Exception as e:
             logger.error(f"Error saving trade history: {e}")
 
