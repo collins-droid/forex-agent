@@ -134,100 +134,142 @@ async function runTradingCycle() {
     }
     
     // 2. Send to OmniParser
-    console.log('Sending to OmniParser...');
-    const omniparserResponse = await sendToOmniParser(settings.omniparserUrl, screenshotResult.image);
-    const marketData = omniparserResponse.marketData;
-    const parsedContentList = omniparserResponse.parsedContentList;
+    console.log('Sending to OmniParser for enhanced analysis...');
+    const omniparserData = await sendToOmniParser(settings.omniparserUrl, screenshotResult.image);
+    
+    // Extract components from the enhanced OmniParser response
+    const parsedContentList = omniparserData.parsed_content_list;
+    const dinoLabeledImg = omniparserData.dino_labeled_img;
+    const originalImage = omniparserData.original_image;
+    
+    // Check if we have an error from OmniParser
+    if (omniparserData.error) {
+      console.warn('OmniParser warning:', omniparserData.error);
+      updateStatus('warning', `OmniParser warning: ${omniparserData.error}`);
+    }
     
     // Log parsed data for debugging
     console.log(`OmniParser found ${parsedContentList.length} elements`);
+    console.log(`Labeled image available: ${Boolean(dinoLabeledImg)}`);
     
-    // Check if we have sufficient data to make a decision
-    if (!validateMarketData(marketData, parsedContentList)) {
-      console.warn('Insufficient market data for reliable analysis');
-      updateStatus('warning', 'Insufficient market data for reliable analysis');
-      return;
-    }
-    
-    // 3. Analyze data with LLM and make trading decision
-    console.log('Getting trading decision from backend...');
-    const tradingDecision = await getTradingDecision(settings.apiKey, marketData, parsedContentList, tradeHistory);
-    
-    // Log the decision details including triggered strategies
-    console.log('Trading decision:', tradingDecision);
-    
-    if (tradingDecision.strategies_triggered && tradingDecision.strategies_triggered.length > 0) {
-      console.log('Strategies triggered:', tradingDecision.strategies_triggered.join(', '));
-    }
-    
-    // 4. Apply risk management based on recent performance
-    const adjustedDecision = applyRiskManagement(tradingDecision, tradePerformance);
-    
-    if (adjustedDecision.action !== tradingDecision.action || 
-        adjustedDecision.direction !== tradingDecision.direction ||
-        adjustedDecision.position_size !== tradingDecision.position_size) {
-      console.log('Decision adjusted by risk management:', adjustedDecision);
-    }
-    
-    // 5. Execute trade if needed
-    if (adjustedDecision.action === 'open' && adjustedDecision.direction) {
-      console.log(`Executing ${adjustedDecision.direction} trade...`);
-      
-      // Add stop loss and take profit if provided
-      const stopLossPips = adjustedDecision.stop_loss_pips || settings.defaultStopLossPips || 15;
-      const takeProfitPips = adjustedDecision.take_profit_pips || settings.defaultTakeProfitPips || 30;
-      
-      const tradeResult = await chrome.tabs.sendMessage(tab.id, {
-        action: 'executeTrade',
-        direction: adjustedDecision.direction,
-        selectors: {
-          buyButtonSelector: settings.buyButtonSelector,
-          sellButtonSelector: settings.sellButtonSelector,
-          lotSizeInputSelector: settings.lotSizeInputSelector,
-          stopLossInputSelector: settings.stopLossInputSelector,
-          takeProfitInputSelector: settings.takeProfitInputSelector
+    // 3. Send to backend for analysis
+    console.log('Analyzing market data through backend API...');
+    try {
+      const apiResponse = await fetch(`http://localhost:5001/analyze`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
         },
-        lotSize: (settings.lotSize || 0.01) * (adjustedDecision.position_size || 1.0),
-        stopLossPips: stopLossPips,
-        takeProfitPips: takeProfitPips
+        body: JSON.stringify({
+          parsed_content_list: parsedContentList,
+          original_image: originalImage,
+          labeled_image: dinoLabeledImg,
+          currency_pair: settings.currencyPair
+        })
       });
       
-      // Merge trade result with decision
-      adjustedDecision.executionSuccess = tradeResult.success;
-      adjustedDecision.profitLoss = tradeResult.profitLoss;
-      adjustedDecision.openPrice = tradeResult.openPrice;
+      if (!apiResponse.ok) {
+        throw new Error(`Backend API returned status ${apiResponse.status}`);
+      }
       
-      // Send notification to user with more detailed analysis
-      chrome.notifications.create({
-        type: 'basic',
-        iconUrl: 'icon48.png',
-        title: `Trade Executed: ${adjustedDecision.direction.toUpperCase()}`,
-        message: `${adjustedDecision.reasoning[0] || 'Based on market analysis'} | SL: ${stopLossPips} pips, TP: ${takeProfitPips} pips`
+      const analysisResult = await apiResponse.json();
+      
+      // Extract market data and trading decision
+      const marketData = analysisResult.forex_data;
+      const tradingDecision = analysisResult.trade_decision;
+      
+      // Check if we have sufficient data to make a decision
+      if (!validateMarketData(marketData, parsedContentList)) {
+        console.warn('Insufficient market data for reliable analysis');
+        updateStatus('warning', 'Insufficient market data for reliable analysis');
+        return;
+      }
+      
+      // 4. Analyze data with LLM and make trading decision
+      console.log('Getting trading decision from backend...');
+      const adjustedDecision = await getTradingDecision(settings.apiKey, marketData, parsedContentList, tradeHistory, originalImage, dinoLabeledImg);
+      
+      // Log the decision details including triggered strategies
+      console.log('Trading decision:', adjustedDecision);
+      
+      if (adjustedDecision.strategies_triggered && adjustedDecision.strategies_triggered.length > 0) {
+        console.log('Strategies triggered:', adjustedDecision.strategies_triggered.join(', '));
+      }
+      
+      // 5. Execute trade if needed
+      if (adjustedDecision.action === 'open' && adjustedDecision.direction) {
+        console.log(`Executing ${adjustedDecision.direction} trade...`);
+        
+        // Add stop loss and take profit if provided
+        const stopLossPips = adjustedDecision.stop_loss_pips || settings.defaultStopLossPips || 15;
+        const takeProfitPips = adjustedDecision.take_profit_pips || settings.defaultTakeProfitPips || 30;
+        
+        const tradeResult = await chrome.tabs.sendMessage(tab.id, {
+          action: 'executeTrade',
+          direction: adjustedDecision.direction,
+          selectors: {
+            buyButtonSelector: settings.buyButtonSelector,
+            sellButtonSelector: settings.sellButtonSelector,
+            lotSizeInputSelector: settings.lotSizeInputSelector,
+            stopLossInputSelector: settings.stopLossInputSelector,
+            takeProfitInputSelector: settings.takeProfitInputSelector
+          },
+          lotSize: (settings.lotSize || 0.01) * (adjustedDecision.position_size || 1.0),
+          stopLossPips: stopLossPips,
+          takeProfitPips: takeProfitPips
+        });
+        
+        // Merge trade result with decision
+        adjustedDecision.executionSuccess = tradeResult.success;
+        adjustedDecision.profitLoss = tradeResult.profitLoss;
+        adjustedDecision.openPrice = tradeResult.openPrice;
+        
+        // Send notification to user with more detailed analysis
+        chrome.notifications.create({
+          type: 'basic',
+          iconUrl: 'icon48.png',
+          title: `Trade Executed: ${adjustedDecision.direction.toUpperCase()}`,
+          message: `${adjustedDecision.reasoning[0] || 'Based on market analysis'} | SL: ${stopLossPips} pips, TP: ${takeProfitPips} pips`
+        });
+        
+        // Update status with the execution details
+        updateStatus('success', `Executed ${adjustedDecision.direction} trade with ${(settings.lotSize * adjustedDecision.position_size).toFixed(2)} lots`);
+      } else {
+        console.log('Decision: HOLD - No trade executed');
+        updateStatus('info', 'Analysis complete: No trade executed');
+      }
+      
+      // 6. Log the trade with enhanced data
+      logTrade({
+        ...adjustedDecision,
+        timestamp: new Date().toISOString(),
+        marketData: marketData,
+        parsedContentList: parsedContentList,
+        analysisType: 'multi-strategy',
+        originalDecision: tradingDecision
       });
       
-      // Update status with the execution details
-      updateStatus('success', `Executed ${adjustedDecision.direction} trade with ${(settings.lotSize * adjustedDecision.position_size).toFixed(2)} lots`);
-    } else {
-      console.log('Decision: HOLD - No trade executed');
-      updateStatus('info', 'Analysis complete: No trade executed');
+      // 7. Update performance metrics with enhanced evaluation
+      evaluatePerformance();
+      
+      // Reset error count on success
+      errorCount.count = 0;
+      
+    } catch (error) {
+      console.error('Error in trading cycle:', error);
+      
+      // Increment error count
+      errorCount.count++;
+      
+      // Handle the failure with better error reporting
+      handleFailure(error);
+      
+      if (errorCount.count >= errorCount.maxErrors) {
+        console.error(`Reached maximum error count (${errorCount.maxErrors}), stopping agent`);
+        stopAgent();
+        updateStatus('error', `Stopped due to repeated errors: ${error.message}`);
+      }
     }
-    
-    // 6. Log the trade with enhanced data
-    logTrade({
-      ...adjustedDecision,
-      timestamp: new Date().toISOString(),
-      marketData: marketData,
-      parsedContentList: parsedContentList,
-      analysisType: 'multi-strategy',
-      originalDecision: tradingDecision
-    });
-    
-    // 7. Update performance metrics with enhanced evaluation
-    evaluatePerformance();
-    
-    // Reset error count on success
-    errorCount.count = 0;
-    
   } catch (error) {
     console.error('Error in trading cycle:', error);
     
@@ -279,13 +321,18 @@ function getSettings() {
  */
 async function sendToOmniParser(omniparserUrl, base64Image) {
   try {
+    console.log('Sending screenshot to OmniParser with enhanced parameters');
+    
     const response = await fetch(`${omniparserUrl}/parse/`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json'
       },
       body: JSON.stringify({
-        image: base64Image
+        base64_image: base64Image,
+        focus: "forex_chart",
+        box_threshold: 0.05,
+        iou_threshold: 0.1
       })
     });
     
@@ -295,64 +342,80 @@ async function sendToOmniParser(omniparserUrl, base64Image) {
     
     const omniparserResponse = await response.json();
     
-    // Extract parsed_content_list from the response
+    // Extract data from the enhanced response
     const parsed_content_list = omniparserResponse.parsed_content_list || [];
+    const dino_labeled_img = omniparserResponse.dino_labeled_img || '';
     
     // Log summary of parsed elements
     console.log(`OmniParser found ${parsed_content_list.length} elements in the image`);
     
-    // Process the parsed content through the backend trading agent
-    // This would normally be done by calling the trading agent's _extract_forex_data
-    // But for simplicity, we'll mock the structure here
-    const marketData = {
-      currency_pair: "EURUSD", // This should come from settings
-      timestamp: new Date().toISOString(),
-      candlestick_patterns: [],
-      indicators: {},
-      price_levels: {},
-      parsed_elements_count: parsed_content_list.length
-    };
+    // Check if we have a labeled image
+    console.log(`Labeled image available: ${Boolean(dino_labeled_img)}`);
     
-    // Return both the structured market data and the raw parsed_content_list
     return {
-      marketData: marketData,
-      parsedContentList: parsed_content_list
+      parsed_content_list,
+      dino_labeled_img,
+      original_image: base64Image
     };
   } catch (error) {
     console.error('OmniParser error:', error);
-    throw new Error('Failed to parse chart: ' + error.message);
+    // Return minimal structure on error
+    return {
+      parsed_content_list: [],
+      dino_labeled_img: '',
+      original_image: base64Image,
+      error: error.message
+    };
   }
 }
 
 /**
  * Get a trading decision from the backend trading agent
+ * @param {string} apiKey - OpenAI API key
+ * @param {Object} marketData - Extracted forex market data
+ * @param {Array} parsedContentList - Raw parsed elements from OmniParser
+ * @param {Array} history - Trade history
+ * @param {string} originalImage - Base64 original chart image
+ * @param {string} labeledImage - Base64 DINO labeled image
+ * @returns {Promise<Object>} - Trading decision
  */
-async function getTradingDecision(apiKey, marketData, parsedContentList, history) {
+async function getTradingDecision(apiKey, marketData, parsedContentList, history, originalImage = '', labeledImage = '') {
   try {
     // Prepare the input data
     const currencyPair = marketData.currency_pair || 'EURUSD';
     
-    // Create the request body
+    // Create the request body with enhanced dual-image support
     const requestData = {
       market_data: marketData,
       parsed_content_list: parsedContentList,
       trade_history: history,
+      original_image: originalImage,
+      labeled_image: labeledImage,
       settings: {
         api_key: apiKey,
         currency_pair: currencyPair,
-        use_multi_strategy: true
+        use_multi_strategy: true,
+        use_dual_image: Boolean(labeledImage)
       }
     };
     
-    // Call the backend API (assuming we have a Python backend)
-    console.log('Calling backend trading agent...');
+    // Log request details for debugging
+    console.log('Trading decision request:');
+    console.log('- Market data fields:', Object.keys(marketData));
+    console.log('- Parsed elements:', parsedContentList.length);
+    console.log('- Using dual-image approach:', Boolean(labeledImage));
+    console.log('- Historical trades:', history.length);
     
-    // Use local backend if available, or shift to OpenAI direct call
+    // Call the backend API (with enhanced error handling)
+    console.log('Calling backend trading agent with enhanced parameters...');
+    
     let decision;
     
     try {
       // Try to call local backend
       const backendUrl = await getBackendUrl();
+      
+      console.log(`Connecting to backend at ${backendUrl}/analyze...`);
       
       const response = await fetch(`${backendUrl}/analyze`, {
         method: 'POST',
@@ -360,7 +423,7 @@ async function getTradingDecision(apiKey, marketData, parsedContentList, history
           'Content-Type': 'application/json'
         },
         body: JSON.stringify(requestData),
-        timeout: 10000  // 10 second timeout
+        timeout: 15000  // 15 second timeout for image processing
       });
       
       if (!response.ok) {
@@ -370,12 +433,24 @@ async function getTradingDecision(apiKey, marketData, parsedContentList, history
       const result = await response.json();
       decision = result.trade_decision;
       
+      // Additional fields from enhanced backend
+      const confidenceMetrics = result.confidence_metrics || {};
+      const strategySignals = result.strategy_signals || {};
+      
       console.log('Backend returned decision', decision);
+      console.log('Strategy signals:', strategySignals);
+      console.log('Confidence metrics:', confidenceMetrics);
+      
+      // Add the additional metrics to the decision
+      decision.confidence_metrics = confidenceMetrics;
+      decision.strategy_signals = strategySignals;
+      
     } catch (backendError) {
       console.warn('Backend call failed, falling back to OpenAI API', backendError);
       
-      // Fall back to OpenAI
-      const prompt = constructPrompt(marketData, parsedContentList, history);
+      // Fall back to OpenAI with dual-image approach if available
+      const prompt = constructPrompt(marketData, parsedContentList, history, 
+                                    Boolean(labeledImage) && Boolean(originalImage));
       
       const openaiResponse = await fetch('https://api.openai.com/v1/chat/completions', {
         method: 'POST',
@@ -384,7 +459,7 @@ async function getTradingDecision(apiKey, marketData, parsedContentList, history
           'Authorization': `Bearer ${apiKey}`
         },
         body: JSON.stringify({
-          model: 'gpt-4-turbo',
+          model: 'gpt-4-vision-preview',
           messages: [
             {
               role: 'system',
@@ -392,11 +467,23 @@ async function getTradingDecision(apiKey, marketData, parsedContentList, history
             },
             {
               role: 'user',
-              content: prompt
+              content: [
+                { type: 'text', text: prompt }
+              ].concat(originalImage ? [
+                { 
+                  type: 'image_url', 
+                  image_url: { url: `data:image/png;base64,${originalImage}` } 
+                }
+              ] : []).concat(labeledImage ? [
+                { 
+                  type: 'image_url', 
+                  image_url: { url: `data:image/png;base64,${labeledImage}` } 
+                }
+              ] : [])
             }
           ],
           temperature: 0.1,
-          max_tokens: 500,
+          max_tokens: 1000,
           response_format: { type: "json_object" }
         })
       });
@@ -486,7 +573,7 @@ async function getBackendUrl() {
 /**
  * Constructs a detailed prompt for the LLM based on market data and trade history
  */
-function constructPrompt(marketData, parsedContentList, history) {
+function constructPrompt(marketData, parsedContentList, history, useDualImage) {
   // Get recent trades history (up to 5 most recent trades)
   const recentTrades = history.slice(-5);
   const historyStr = JSON.stringify(recentTrades, null, 2) || "None";
@@ -514,9 +601,28 @@ function constructPrompt(marketData, parsedContentList, history) {
     performanceStr = `Win rate: ${winRate}% (${wins}/${recentTrades.length} trades)`;
   }
   
+  // Add dual-image specific instructions if using the vision model
+  let dualImageInstructions = "";
+  if (useDualImage) {
+    dualImageInstructions = `
+DUAL-IMAGE ANALYSIS INSTRUCTIONS:
+You are provided with two images:
+1. The original chart image showing the forex trading interface
+2. A DINO-labeled image with detected objects and text highlighted
+
+When analyzing these images:
+- The original image gives you context and visual patterns
+- The labeled image highlights detected price levels, indicators, and text
+- Pay special attention to areas highlighted in the labeled image
+- Identify candlestick patterns, trend lines, and support/resistance levels
+- Look for indicator values (RSI, MACD, etc.) in both images
+- Compare visual patterns with the extracted data in the market data JSON
+`;
+  }
+  
   // Create a structured prompt with multiple trading strategies
   return `
-You are an expert Forex trading AI using a multi-strategy approach.
+You are an expert Forex trading AI using a multi-strategy approach${useDualImage ? ' with dual-image analysis capabilities' : ''}.
 
 MARKET DATA (extracted from OmniParser):
 \`\`\`json
@@ -531,32 +637,41 @@ ${historyStr}
 \`\`\`
 
 PERFORMANCE: ${performanceStr}
-
+${dualImageInstructions}
 AVAILABLE TRADING STRATEGIES:
 1. Trend Following
    - Buy in uptrends confirmed by positive MACD
    - Sell in downtrends confirmed by negative MACD
+   - Look for aligned moving averages (20 EMA > 50 EMA for uptrends)
 
 2. Breakout Strategy
    - Buy on confirmed resistance breakouts
    - Sell on confirmed support breakdowns
+   - Require volume confirmation when possible
+   - Look for price exceeding previous swing highs/lows
 
 3. Mean Reversion
-   - Buy when RSI < 30 (oversold)
-   - Sell when RSI > 70 (overbought)
+   - Buy when RSI < 30 (oversold) and price near support
+   - Sell when RSI > 70 (overbought) and price near resistance
+   - Check Bollinger Band compression and expansion
 
 4. Pattern Recognition
    - Buy on bullish patterns (engulfing, hammer, morning star)
    - Sell on bearish patterns (engulfing, shooting star, evening star)
+   - Validate patterns with volume and location (support/resistance)
 
-5. Multi-Timeframe Analysis (simulated)
+5. Multi-Timeframe Analysis
    - Confirm signals across multiple indicators
+   - Ensure alignment of short and medium-term trends
+   - Look for confluence of signals (multiple indicators agreeing)
 
 RISK MANAGEMENT RULES:
 - Apply tighter stop-loss in high volatility conditions
-- Reduce position size after consecutive losses
-- Increase position size during successful streaks
-- Consider ATR for stop-loss/take-profit levels
+- Reduce position size after consecutive losses (0.5x after 2+ losses)
+- Increase position size gradually during successful streaks (max 1.5x)
+- Use ATR for stop-loss calculation (1.5-2x ATR for stop-loss distance)
+- Set risk-reward ratio minimum of 1:1.5, preferably 1:2 or higher
+- Maximum risk per trade: 2% of account balance
 
 ANALYSIS INSTRUCTIONS:
 1. Evaluate each strategy separately
@@ -564,6 +679,12 @@ ANALYSIS INSTRUCTIONS:
 3. Check for confirming/conflicting signals between strategies
 4. Apply risk management rules
 5. Provide specific values for stop-loss and take-profit
+6. Calculate position size based on risk parameters
+7. Include confidence score based on signal strength and confluence
+
+${useDualImage ? `IMAGE ANALYSIS:
+Analyze both provided images carefully. Use the original image for context and pattern recognition, and the labeled image to identify key elements highlighted by the DINO detector. Incorporate visual cues into your decision-making process.
+` : ''}
 
 REQUIRED OUTPUT FORMAT (JSON):
 {
@@ -574,7 +695,12 @@ REQUIRED OUTPUT FORMAT (JSON):
   "strategies_triggered": ["strategy1", "strategy2", ...],
   "stop_loss_pips": number,
   "take_profit_pips": number,
-  "position_size": number
+  "position_size": number,
+  "market_conditions": {
+    "trend": "bullish", "bearish", or "sideways",
+    "volatility": "high", "normal", or "low",
+    "key_levels": ["level1", "level2", ...]
+  }
 }
 `;
 }

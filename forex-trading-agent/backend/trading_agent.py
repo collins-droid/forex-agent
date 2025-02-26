@@ -13,6 +13,7 @@ from datetime import datetime
 from typing import Dict, List, Any, Optional, Tuple, Union
 import re
 import copy
+import openai
 
 # Configure logging
 logging.basicConfig(
@@ -904,37 +905,85 @@ class TradingAgent:
                 "currency_pair": self.currency_pair
             }
     
-    def _construct_prompt(self, market_data: Dict[str, Any]) -> str:
+    def _construct_prompt(self, market_data: Dict[str, Any], original_img: str = "", labeled_img: str = "") -> str:
         """
-        Construct a prompt for the LLM based on market data and trade history.
+        Construct a prompt for the LLM based on market data, trade history, and images.
+        Enhanced with dual-image prompting when images are provided.
         
         Args:
             market_data: Structured forex market data
+            original_img: Base64-encoded original screenshot (optional)
+            labeled_img: Base64-encoded labeled screenshot from OmniParser (optional)
             
         Returns:
             Formatted prompt string
         """
-        # Get recent trade history (up to 3 most recent trades)
-        history = self.trade_history[-3:] if self.trade_history else []
+        # Get recent trade history (up to 5 most recent trades for better context)
+        history = self.trade_history[-5:] if self.trade_history else []
         history_str = json.dumps(history, indent=2) if history else "None"
+        
+        # Get performance metrics if available
+        performance = self.evaluate_performance() if self.trade_history else {"win_rate": 0.0, "total_trades": 0}
+        performance_str = f"Win Rate: {performance.get('win_rate', 0):.2f}%, Total Trades: {performance.get('total_trades', 0)}"
+        
+        # Add image context if provided
+        image_context = ""
+        if original_img and labeled_img:
+            image_context = """
+        You have access to two images:
+        1. Original Image: The raw trading chart screenshot
+        2. Labeled Image: The same screenshot annotated by OmniParser showing detected elements
+        
+        Use both images to enhance your analysis. The labeled image shows key indicators, price levels,
+        and patterns detected by OmniParser.
+        """
         
         prompt = f"""
         You are a Forex trading AI for Exness on {self.currency_pair}.
-        OmniParser data:
+        {image_context}
+        OmniParser extracted data:
         ```json
         {json.dumps(market_data, indent=2)}
         ```
+        
+        Performance metrics:
+        {performance_str}
+        
         Recent trades:
         ```json
         {history_str}
         ```
-        Strategy: Buy if bullish engulfing and RSI < 30; Sell if bearish engulfing and RSI > 70; else Hold.
-        Instructions:
-        1. Analyze OmniParser data step-by-step.
-        2. Use history to avoid repeated errors.
-        3. Output: {{"action": "buy/sell/hold", "reasoning": "your logic"}}
-        """
         
+        Trading strategies:
+        1. Trend Following: Buy in uptrends with RSI < 50, Sell in downtrends with RSI > 50
+        2. Pattern Recognition: Buy on bullish patterns, Sell on bearish patterns
+        3. Breakout: Buy on resistance breaks, Sell on support breaks
+        4. Mean Reversion: Buy when oversold (RSI < 30), Sell when overbought (RSI > 70)
+        5. Support/Resistance: Buy near support, Sell near resistance
+        
+        Risk management:
+        - Avoid trading in high volatility without clear signals
+        - Reduce position size after consecutive losses
+        - Respect resistance and support levels
+        
+        Instructions:
+        1. Analyze the data and images to identify market conditions
+        2. Identify which trading strategies are applicable
+        3. Apply appropriate risk management rules
+        4. Consider past trade history to avoid repeated mistakes
+        5. Generate a clear trading decision with reasoning
+        
+        Output format:
+        ```json
+        {
+          "action": "buy/sell/hold",
+          "reasoning": ["concise", "step-by-step", "logic"],
+          "confidence": 0.0-1.0,
+          "strategies_used": ["list", "of", "strategies"],
+          "risk_assessment": "low/medium/high"
+        }
+        ```
+        """
         return prompt
     
     def log_performance(self, trade: Dict[str, Any], profit: Optional[float] = None) -> None:
@@ -992,147 +1041,38 @@ class TradingAgent:
         avg_profit = sum(t["profit"] for t in winning_trades) / len(winning_trades) if winning_trades else 0
         avg_loss = sum(t["profit"] for t in losing_trades) / len(losing_trades) if losing_trades else 0
         
-        return {
-            "win_rate": win_rate,
-            "profit_loss": profit_loss,
-            "total_trades": total_trades,
-            "average_profit": avg_profit,
-            "average_loss": avg_loss
-        }
-
-    def log_trade(self, trade: Dict[str, Any], market_data: Dict[str, Any], parsed_content_list: List[Dict[str, Any]], dino_labeled_img: str = "") -> None:
-        """
-        Log a trade to the trade history with enhanced OmniParser data.
-        
-        Args:
-            trade: The trade decision
-            market_data: The market data that led to the decision
-            parsed_content_list: The raw OmniParser output
-            dino_labeled_img: Base64-encoded labeled image from OmniParser
-        """
-        trade_log = {
-            "timestamp": trade.get("timestamp", datetime.now().isoformat()),
-            "currency_pair": self.currency_pair,
-            "action": trade["action"],
-            "reasoning": trade["reasoning"],
-            "reward": trade["reward"],
-            "market_data": market_data,
-            "parsed_content_list": parsed_content_list,
-            "dino_labeled_img": dino_labeled_img
-        }
-        
-        self.trade_history.append(trade_log)
-        logger.info(f"Trade logged: {trade['action']} at {trade_log['timestamp']}")
-        
-        # Optionally, you could save to a database or file here
-        try:
-            with open(f"{self.currency_pair}_trade_history.json", 'w') as f:
-                # Save a version without the large base64 images for efficiency
-                save_log = copy.deepcopy(trade_log)
-                if save_log.get("dino_labeled_img"):
-                    save_log["has_labeled_img"] = True
-                    save_log["dino_labeled_img"] = "...base64 image removed for storage efficiency..."
-                
-                history_to_save = [log if not isinstance(log, dict) or not log.get("dino_labeled_img") 
-                                 else {**log, "dino_labeled_img": "...base64 image removed..."}
-                                 for log in self.trade_history]
-                
-                json.dump(history_to_save, f, indent=2, default=str)
-        except Exception as e:
-            logger.error(f"Error saving trade history: {e}")
-
-    def evaluate_performance(self) -> Dict[str, Any]:
-        """
-        Evaluate the trading performance based on trade history.
-        
-        Returns:
-            Dict containing comprehensive performance metrics
-        """
-        if not self.trade_history:
-            return {
-                "win_rate": 0.0, 
-                "total_trades": 0, 
-                "active_trades": 0,
-                "total_pips": 0,
-                "largest_win": 0,
-                "largest_loss": 0,
-                "avg_win": 0,
-                "avg_loss": 0,
-                "profit_factor": 0,
-                "sharpe_ratio": 0,
-                "max_drawdown": 0,
-                "strategy_performance": {}
-            }
-        
-        # Count trades that are not "hold"
-        trades = [t for t in self.trade_history if t["action"] != "hold"]
-        total_trades = len(trades)
-        
-        if total_trades == 0:
-            return {
-                "win_rate": 0.0, 
-                "total_trades": 0, 
-                "active_trades": 0,
-                "total_pips": 0,
-                "largest_win": 0,
-                "largest_loss": 0,
-                "avg_win": 0,
-                "avg_loss": 0,
-                "profit_factor": 0,
-                "sharpe_ratio": 0,
-                "max_drawdown": 0,
-                "strategy_performance": {}
-            }
-        
-        # Calculate basic metrics
-        wins = [t for t in trades if t.get("reward", 0) > 0]
-        losses = [t for t in trades if t.get("reward", 0) < 0]
-        
-        win_count = len(wins)
-        loss_count = len(losses)
-        
-        win_rate = (win_count / total_trades * 100) if total_trades else 0.0
-        
-        # Calculate pip-based metrics
-        total_pips = sum(t.get("reward", 0) for t in trades)
-        total_win_pips = sum(t.get("reward", 0) for t in wins) if wins else 0
-        total_loss_pips = abs(sum(t.get("reward", 0) for t in losses)) if losses else 0
-        
-        avg_win = total_win_pips / win_count if win_count else 0
-        avg_loss = total_loss_pips / loss_count if loss_count else 0
-        
-        largest_win = max([t.get("reward", 0) for t in wins]) if wins else 0
-        largest_loss = abs(min([t.get("reward", 0) for t in losses])) if losses else 0
+        largest_win = max([t.get("profit", 0) for t in winning_trades]) if winning_trades else 0
+        largest_loss = abs(min([t.get("profit", 0) for t in losing_trades])) if losing_trades else 0
         
         # Profit factor (ratio of gross profits to gross losses)
-        profit_factor = total_win_pips / total_loss_pips if total_loss_pips > 0 else float('inf') if total_win_pips > 0 else 0
+        profit_factor = sum(t["profit"] for t in winning_trades) / abs(sum(t["profit"] for t in losing_trades)) if losing_trades else float('inf') if sum(t["profit"] for t in winning_trades) > 0 else 0
         
         # Calculate drawdown metrics
-        cumulative_pips = [0]
+        cumulative_profit = [0]
         peak = 0
         drawdowns = []
         
         # Sort trades by timestamp
-        sorted_trades = sorted(trades, key=lambda t: datetime.fromisoformat(t.get("timestamp", "2023-01-01T00:00:00")))
+        sorted_trades = sorted(trades_with_profit, key=lambda t: datetime.fromisoformat(t.get("timestamp", "2023-01-01T00:00:00")))
         
-        # Calculate cumulative pips and track drawdowns
+        # Calculate cumulative profit and track drawdowns
         for trade in sorted_trades:
-            reward = trade.get("reward", 0)
-            cumulative_pips.append(cumulative_pips[-1] + reward)
+            profit = trade["profit"]
+            cumulative_profit.append(cumulative_profit[-1] + profit)
             
             # Update peak if we have a new high
-            if cumulative_pips[-1] > peak:
-                peak = cumulative_pips[-1]
+            if cumulative_profit[-1] > peak:
+                peak = cumulative_profit[-1]
             # Calculate current drawdown
             elif peak > 0:
-                drawdown = (peak - cumulative_pips[-1]) / peak if peak > 0 else 0
+                drawdown = (peak - cumulative_profit[-1]) / peak if peak > 0 else 0
                 drawdowns.append(drawdown)
         
         max_drawdown = max(drawdowns) * 100 if drawdowns else 0  # As percentage
         
         # Calculate Sharpe ratio (simplified)
-        if len(cumulative_pips) > 1:
-            returns = [cumulative_pips[i] - cumulative_pips[i-1] for i in range(1, len(cumulative_pips))]
+        if len(cumulative_profit) > 1:
+            returns = [cumulative_profit[i] - cumulative_profit[i-1] for i in range(1, len(cumulative_profit))]
             avg_return = sum(returns) / len(returns)
             std_dev = (sum((r - avg_return) ** 2 for r in returns) / len(returns)) ** 0.5
             sharpe_ratio = avg_return / std_dev if std_dev > 0 else 0
@@ -1140,10 +1080,12 @@ class TradingAgent:
             sharpe_ratio = 0
         
         # Calculate active trades
-        active_trades = sum(1 for t in trades if t.get("status") == "open")
+        active_trades = sum(1 for t in trades_with_profit if t.get("status") == "open")
         
         # Calculate strategy performance
         strategy_performance = {}
+        for trade in trades_with_profit:
+            strategies = trade.get("strategies_used", [])
         for trade in trades:
             strategies = trade.get("strategies_triggered", [])
             result = "win" if trade.get("reward", 0) > 0 else "loss" if trade.get("reward", 0) < 0 else "tie"
