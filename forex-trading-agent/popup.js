@@ -114,10 +114,77 @@ document.addEventListener('DOMContentLoaded', function() {
 
   // Listen for updates from background script
   chrome.runtime.onMessage.addListener(function(message) {
-    if (message.action === 'updateMetrics') {
-      winRateSpan.textContent = message.winRate + '%';
-      profitLossSpan.textContent = '$' + message.profitLoss.toFixed(2);
-      totalTradesSpan.textContent = message.totalTrades;
+    console.log('Popup received message:', message);
+    
+    if (message.type === 'performance_update' || message.message === 'performance_update') {
+      const data = message.data || message;
+      
+      if (data.winRate !== undefined) {
+        winRateSpan.textContent = data.winRate + '%';
+        // Add color coding based on win rate
+        if (parseFloat(data.winRate) > 60) {
+          winRateSpan.className = 'metric-value success';
+        } else if (parseFloat(data.winRate) < 40) {
+          winRateSpan.className = 'metric-value danger';
+        } else {
+          winRateSpan.className = 'metric-value neutral';
+        }
+      }
+      
+      if (data.avgProfitLoss !== undefined) {
+        profitLossSpan.textContent = data.avgProfitLoss;
+      }
+      
+      if (data.totalTrades !== undefined) {
+        totalTradesSpan.textContent = data.totalTrades;
+      }
+      
+      if (data.lastTradeTime !== undefined) {
+        const lastTradeTimeSpan = document.getElementById('lastTradeTime');
+        if (lastTradeTimeSpan) {
+          const date = new Date(data.lastTradeTime);
+          lastTradeTimeSpan.textContent = date.toLocaleTimeString();
+        }
+      }
+      
+      // Update status indicator if provided
+      if (data.status !== undefined) {
+        const statusIndicator = document.getElementById('statusIndicator');
+        if (statusIndicator) {
+          statusIndicator.className = `status-dot ${data.status}`;
+          statusIndicator.title = `Agent is ${data.status}`;
+        }
+      }
+    }
+    
+    // Handle error messages
+    if (message.type === 'error' || message.message === 'error') {
+      const errorContainer = document.getElementById('errorContainer');
+      if (errorContainer) {
+        errorContainer.textContent = message.data?.error || message.error || 'Unknown error';
+        errorContainer.style.display = 'block';
+        
+        // Auto-hide after 10 seconds
+        setTimeout(() => {
+          errorContainer.style.display = 'none';
+        }, 10000);
+      }
     }
   });
+
+  // Add refresh button functionality
+  const refreshBtn = document.getElementById('refreshBtn');
+  if (refreshBtn) {
+    refreshBtn.addEventListener('click', function() {
+      chrome.runtime.sendMessage({ action: 'getPerformanceMetrics' }, function(response) {
+        if (response && response.data) {
+          // Update UI with fresh metrics
+          chrome.runtime.sendMessage({
+            message: 'performance_update',
+            data: response.data
+          });
+        }
+      });
+    });
+  }
 }); 

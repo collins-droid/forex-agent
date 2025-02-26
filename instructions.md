@@ -10,17 +10,93 @@
 #### 2. Build the Chrome Extension Structure
 - Create the following directory structure:
   ```
-  forex-trading-agent/
-  ├── manifest.json
-  ├── popup.html
-  ├── popup.js
-  ├── content.js
-  ├── background.js
-  ├── backend/
-  │   ├── trading_agent.py
-  │   ├── requirements.txt
-  │   └── utils.py (optional)
-  └── icon.png (optional)
+  Current   Directory structure:
+└── collins-droid-forex-agent/
+    ├── changeLog.md
+    ├── instructions.md
+    ├── OmniPaser/
+    │   ├── README.md
+    │   ├── demo.ipynb
+    │   ├── gradio_demo.py
+    │   ├── requirements.txt
+    │   ├── .gitignore
+    │   ├── docs/
+    │   │   └── Evaluation.md
+    │   ├── eval/
+    │   │   ├── logs_sspro_omniv2.json
+    │   │   └── ss_pro_gpt4o_omniv2.py
+    │   ├── imgs/
+    │   ├── omnitool/
+    │   │   ├── readme.md
+    │   │   ├── gradio/
+    │   │   │   ├── __init__.py
+    │   │   │   ├── app.py
+    │   │   │   ├── loop.py
+    │   │   │   ├── .gitignore
+    │   │   │   ├── agent/
+    │   │   │   │   ├── anthropic_agent.py
+    │   │   │   │   ├── vlm_agent.py
+    │   │   │   │   └── llm_utils/
+    │   │   │   │       ├── groqclient.py
+    │   │   │   │       ├── oaiclient.py
+    │   │   │   │       ├── omniparserclient.py
+    │   │   │   │       └── utils.py
+    │   │   │   ├── executor/
+    │   │   │   │   └── anthropic_executor.py
+    │   │   │   └── tools/
+    │   │   │       ├── __init__.py
+    │   │   │       ├── base.py
+    │   │   │       ├── collection.py
+    │   │   │       ├── computer.py
+    │   │   │       └── screen_capture.py
+    │   │   ├── omnibox/
+    │   │   │   ├── Dockerfile
+    │   │   │   ├── compose.yml
+    │   │   │   ├── .gitignore
+    │   │   │   ├── scripts/
+    │   │   │   │   ├── manage_vm.ps1
+    │   │   │   │   └── manage_vm.sh
+    │   │   │   └── vm/
+    │   │   │       ├── buildcontainer/
+    │   │   │       │   ├── define.sh
+    │   │   │       │   ├── entry.sh
+    │   │   │       │   ├── install.sh
+    │   │   │       │   ├── power.sh
+    │   │   │       │   └── samba.sh
+    │   │   │       ├── win11def/
+    │   │   │       │   └── win11x64-enterprise-eval.xml
+    │   │   │       ├── win11iso/
+    │   │   │       │   └── README.md
+    │   │   │       └── win11setup/
+    │   │   │           ├── firstboot/
+    │   │   │           │   └── install.bat
+    │   │   │           └── setupscripts/
+    │   │   │               ├── on-logon.ps1
+    │   │   │               ├── setup-tools.psm1
+    │   │   │               ├── setup.ps1
+    │   │   │               ├── tools_config.json
+    │   │   │               └── server/
+    │   │   │                   ├── main.py
+    │   │   │                   └── requirements.txt
+    │   │   └── omniparserserver/
+    │   │       └── omniparserserver.py
+    │   └── util/
+    │       ├── __init__.py
+    │       ├── box_annotator.py
+    │       ├── omniparser.py
+    │       └── utils.py
+    └── forex-trading-agent/
+        ├── README.md
+        ├── background.js
+        ├── content.js
+        ├── manifest.json
+        ├── popup.html
+        ├── popup.js
+        └── backend/
+            ├── requirements.txt
+            ├── trading_agent.py
+            └── utils.py
+
   ```
 - In `manifest.json`, use Manifest V3 with:
   - Permissions: `"activeTab"`, `"storage"`, `"scripting"`, `"unlimitedStorage"`.
